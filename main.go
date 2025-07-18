@@ -17,17 +17,16 @@ import (
 
 // Repository описывает отслеживаемый репозиторий
 type Repository struct {
-	Name   string // Уникальное имя для логов и файлов
-	GitURL string // URL для git clone
-	WebURL string // URL для формирования ссылок на файлы
-	Path   string // Локальная папка
+	Name   string
+	GitURL string
+	WebURL string
+	Path   string
 }
 
 type Config struct {
 	Repositories     []Repository
 	TelegramBotToken string
 	TelegramChatID   string
-	IsTestRun        bool
 }
 
 func main() {
@@ -37,9 +36,6 @@ func main() {
 	}
 
 	log.Println("Скрипт отслеживания запущен.")
-	if cfg.IsTestRun {
-		log.Println("РЕЖИМ ТЕСТИРОВАНИЯ АКТИВИРОВАН.")
-	}
 
 	var wg sync.WaitGroup
 	for _, repo := range cfg.Repositories {
@@ -74,17 +70,16 @@ func getConfig() (Config, error) {
 			{
 				Name:   "nucleihub-templates",
 				GitURL: "https://github.com/rix4uni/nucleihub-templates.git",
-				WebURL: "https://github.com/rix4uni/nucleihub-templates/blob/main", // У этого репо ветка 'main'
+				WebURL: "https://github.com/rix4uni/nucleihub-templates/blob/main",
 				Path:   "nucleihub-templates",
 			},
 		},
 		TelegramBotToken: token,
 		TelegramChatID:   chatID,
-		IsTestRun:        strings.ToLower(os.Getenv("FORCE_TEST_NOTIFICATION" )) == "true",
 	}, nil
 }
 
-func checkRepository(repo Repository, cfg Config) error {
+func checkRepository(repo Repository, cfg Config ) error {
 	if err := prepareRepo(repo); err != nil {
 		return fmt.Errorf("не удалось подготовить репозиторий: %w", err)
 	}
@@ -106,27 +101,42 @@ func checkRepository(repo Repository, cfg Config) error {
 		}
 	}
 
-	if cfg.IsTestRun {
-		log.Printf("[%s] Отправка тестового уведомления со ссылками...", repo.Name)
-		testTemplates := []string{fmt.Sprintf("%s/test/template-1.yaml", repo.Path), fmt.Sprintf("%s/test/template-2.yaml", repo.Path)}
-		return notifyAboutNewTemplates(repo, testTemplates, cfg.TelegramBotToken, cfg.TelegramChatID)
+	if isFirstRun {
+		// При первом запуске просто создаем базу и отправляем стартовое сообщение
+		log.Printf("[%s] Первый запуск. Найдено %d шаблонов. Сохраняю состояние.", repo.Name, len(currentTemplates))
+		message := fmt.Sprintf("✅ *Начинаю отслеживание репозитория `%s`.*\n\nОбнаружено и сохранено %d шаблонов. Уведомления будут приходить при появлении новых.", repo.Name, len(currentTemplates))
+		if err := sendTelegramMessage(message, cfg.TelegramBotToken, cfg.TelegramChatID); err != nil {
+			log.Printf("WARN: Не удалось отправить стартовое уведомление для [%s]: %v", repo.Name, err)
+		}
+	} else if len(newTemplates) > 0 {
+		// При последующих запусках, если есть что-то новое, отправляем ссылки
+		log.Printf("[%s] Найдено %d новых шаблонов. Отправляю уведомление...", repo.Name, len(newTemplates))
+		
+		var msg strings.Builder
+		msg.WriteString(fmt.Sprintf("🔔 *Обнаружены новые шаблоны в `%s` (%d шт.):*\n\n", repo.Name, len(newTemplates)))
+		for _, tpl := range newTemplates {
+			relativePath := strings.TrimPrefix(tpl, repo.Path+string(filepath.Separator))
+			fileURL := fmt.Sprintf("%s/%s", repo.WebURL, relativePath)
+			msg.WriteString(fmt.Sprintf("• [%s](%s)\n", relativePath, fileURL))
+		}
+
+		if err := sendTelegramMessage(msg.String(), cfg.TelegramBotToken, cfg.TelegramChatID); err != nil {
+			log.Printf("WARN: Не удалось отправить уведомление для [%s]: %v", repo.Name, err)
+		}
+	} else {
+		// Если ничего нового нет, просто пишем в лог
+		log.Printf("[%s] Новых шаблонов не найдено.", repo.Name)
 	}
 
-	if len(newTemplates) > 0 {
-		if isFirstRun {
-			log.Printf("[%s] Первый запуск. Найдено %d шаблонов. Сохраняю состояние, уведомление не отправлено.", repo.Name, len(currentTemplates))
-		} else {
-			log.Printf("[%s] Найдено %d новых шаблонов. Отправляю уведомление...", repo.Name, len(newTemplates))
-			if err := notifyAboutNewTemplates(repo, newTemplates, cfg.TelegramBotToken, cfg.TelegramChatID); err != nil {
-				log.Printf("WARN: Не удалось отправить уведомление для [%s]: %v", repo.Name, err)
-			}
-		}
+	// Обновляем файл состояния, если это был первый запуск или нашлись новые шаблоны
+	if isFirstRun || len(newTemplates) > 0 {
 		return writeTemplatesToFile(stateFile, currentTemplates)
 	}
 
-	log.Printf("[%s] Новых шаблонов не найдено.", repo.Name)
 	return nil
 }
+
+// ... (вспомогательные функции ниже без изменений)
 
 func prepareRepo(repo Repository) error {
 	if _, err := os.Stat(repo.Path); os.IsNotExist(err) {
@@ -178,23 +188,11 @@ func writeTemplatesToFile(file string, templates []string) error {
 	return writer.Flush()
 }
 
-// notifyAboutNewTemplates теперь формирует кликабельные ссылки
-func notifyAboutNewTemplates(repo Repository, templates []string, token, chatID string) error {
-	var msg strings.Builder
-	msg.WriteString(fmt.Sprintf("🔔 *Обнаружены новые шаблоны в `%s` (%d шт.):*\n\n", repo.Name, len(templates)))
-	for _, tpl := range templates {
-		// Убираем префикс папки, чтобы получить относительный путь
-		relativePath := strings.TrimPrefix(tpl, repo.Path+string(filepath.Separator))
-		// Формируем полную ссылку на файл
-		fileURL := fmt.Sprintf("%s/%s", repo.WebURL, relativePath)
-		// Добавляем в сообщение Markdown-ссылку
-		msg.WriteString(fmt.Sprintf("• [%s](%s)\n", relativePath, fileURL))
-	}
-
+func sendTelegramMessage(message string, token, chatID string) error {
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token )
 	payload, _ := json.Marshal(map[string]string{
 		"chat_id":    chatID,
-		"text":       msg.String(),
+		"text":       message,
 		"parse_mode": "Markdown",
 	})
 
@@ -207,7 +205,5 @@ func notifyAboutNewTemplates(repo Repository, templates []string, token, chatID 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("неожиданный статус-код от Telegram API: %d", resp.StatusCode )
 	}
-
-	log.Printf("Уведомление для [%s] успешно отправлено.", repo.Name)
 	return nil
 }
