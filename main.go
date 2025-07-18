@@ -1,3 +1,4 @@
+// Вставьте сюда этот безопасный код
 package main
 
 import (
@@ -25,8 +26,8 @@ type Repository struct {
 // Config хранит конфигурацию скрипта
 type Config struct {
 	Repositories     []Repository
-	TelegramBotToken 7433491144:AAGUuWtOhYgwaSqn-6jrl8B-tjLSN4lVf0Q
-	TelegramChatID   -4651584017
+	TelegramBotToken string
+	TelegramChatID   string
 }
 
 func main() {
