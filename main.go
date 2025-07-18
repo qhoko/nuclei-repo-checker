@@ -1,4 +1,3 @@
-// Вставьте сюда этот безопасный код
 package main
 
 import (
@@ -16,35 +15,35 @@ import (
 	"sync"
  )
 
-// Repository описывает отслеживаемый репозиторий
 type Repository struct {
-	Name string // Уникальное имя для логов и файлов
-	URL  string // Git URL
-	Path string // Локальная папка
+	Name, URL, Path string
 }
 
-// Config хранит конфигурацию скрипта
 type Config struct {
 	Repositories     []Repository
 	TelegramBotToken string
 	TelegramChatID   string
+	IsTestRun        bool
 }
 
 func main() {
 	cfg, err := getConfig()
 	if err != nil {
-		log.Fatalf("Ошибка конфигурации: %v", err)
+		log.Fatalf("FATAL: Ошибка конфигурации: %v", err)
 	}
 
 	log.Println("Скрипт отслеживания запущен.")
+	if cfg.IsTestRun {
+		log.Println("РЕЖИМ ТЕСТИРОВАНИЯ АКТИВИРОВАН.")
+	}
 
 	var wg sync.WaitGroup
 	for _, repo := range cfg.Repositories {
 		wg.Add(1)
 		go func(r Repository) {
 			defer wg.Done()
-			if err := checkRepository(r, cfg.TelegramBotToken, cfg.TelegramChatID); err != nil {
-				log.Printf("Ошибка при проверке [%s]: %v", r.Name, err)
+			if err := checkRepository(r, cfg); err != nil {
+				log.Printf("ERROR: Ошибка при проверке [%s]: %v", r.Name, err)
 			}
 		}(repo)
 	}
@@ -53,11 +52,9 @@ func main() {
 	log.Println("Проверка завершена.")
 }
 
-// getConfig собирает конфигурацию из переменных окружения
 func getConfig() (Config, error) {
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
 	chatID := os.Getenv("TELEGRAM_CHAT_ID")
-
 	if token == "" || chatID == "" {
 		return Config{}, fmt.Errorf("переменные окружения TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID должны быть установлены")
 	}
@@ -69,12 +66,11 @@ func getConfig() (Config, error) {
 		},
 		TelegramBotToken: token,
 		TelegramChatID:   chatID,
+		IsTestRun:        strings.ToLower(os.Getenv("FORCE_TEST_NOTIFICATION")) == "true",,
 	}, nil
 }
 
-// checkRepository выполняет всю логику для одного репозитория
-func checkRepository(repo Repository, token, chatID string ) error {
-	// Шаг 1: Клонировать или обновить репозиторий
+func checkRepository(repo Repository, cfg Config) error {
 	if err := prepareRepo(repo); err != nil {
 		return fmt.Errorf("не удалось подготовить репозиторий: %w", err)
 	}
@@ -83,14 +79,12 @@ func checkRepository(repo Repository, token, chatID string ) error {
 	_, err := os.Stat(stateFile)
 	isFirstRun := os.IsNotExist(err)
 
-	// Шаг 2: Получить списки шаблонов
 	knownTemplates, _ := readTemplatesFromFile(stateFile)
 	currentTemplates, err := scanForTemplates(repo.Path)
 	if err != nil {
 		return fmt.Errorf("не удалось просканировать шаблоны: %w", err)
 	}
 
-	// Шаг 3: Найти новые шаблоны
 	var newTemplates []string
 	for _, tpl := range currentTemplates {
 		if _, found := knownTemplates[tpl]; !found {
@@ -98,27 +92,36 @@ func checkRepository(repo Repository, token, chatID string ) error {
 		}
 	}
 
-	// Шаг 4: Отправить уведомление и/или обновить состояние
-	if len(newTemplates) > 0 {
-		if !isFirstRun {
-			if err := notifyAboutNewTemplates(repo, newTemplates, token, chatID); err != nil {
-				log.Printf("Предупреждение: не удалось отправить уведомление для [%s]: %v", repo.Name, err)
-			}
-		}
-		if err := writeTemplatesToFile(stateFile, currentTemplates); err != nil {
-			return fmt.Errorf("не удалось обновить файл состояния: %w", err)
-		}
+	// --- Основная логика отправки ---
+	if cfg.IsTestRun {
+		log.Printf("[%s] Отправка тестового уведомления...", repo.Name)
+		testTemplates := []string{fmt.Sprintf("test/template-1-from-%s.yaml", repo.Name), "test/template-2.yaml"}
+		return notifyAboutNewTemplates(repo, testTemplates, cfg.TelegramBotToken, cfg.TelegramChatID)
 	}
 
+	if len(newTemplates) > 0 {
+		if isFirstRun {
+			log.Printf("[%s] Первый запуск. Найдено %d шаблонов. Сохраняю состояние, уведомление не отправлено.", repo.Name, len(currentTemplates))
+		} else {
+			log.Printf("[%s] Найдено %d новых шаблонов. Отправляю уведомление...", repo.Name, len(newTemplates))
+			if err := notifyAboutNewTemplates(repo, newTemplates, cfg.TelegramBotToken, cfg.TelegramChatID); err != nil {
+				log.Printf("WARN: Не удалось отправить уведомление для [%s]: %v", repo.Name, err)
+			}
+		}
+		return writeTemplatesToFile(stateFile, currentTemplates)
+	}
+
+	log.Printf("[%s] Новых шаблонов не найдено.", repo.Name)
 	return nil
 }
 
-// --- Вспомогательные функции ---
-
+// ... (остальные функции без изменений)
 func prepareRepo(repo Repository) error {
 	if _, err := os.Stat(repo.Path); os.IsNotExist(err) {
+		log.Printf("[%s] Клонирую репозиторий...", repo.Name)
 		return exec.Command("git", "clone", "--depth", "1", repo.URL, repo.Path).Run()
 	}
+	log.Printf("[%s] Обновляю репозиторий...", repo.Name)
 	return exec.Command("git", "-C", repo.Path, "pull").Run()
 }
 
@@ -148,6 +151,7 @@ func readTemplatesFromFile(file string) (map[string]bool, error) {
 }
 
 func writeTemplatesToFile(file string, templates []string) error {
+	log.Printf("Запись %d шаблонов в файл %s", len(templates), file)
 	f, err := os.Create(file)
 	if err != nil {
 		return err
