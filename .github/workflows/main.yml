@@ -1,29 +1,40 @@
 name: Check for new Nuclei templates
 
 on:
-  # Запускать по расписанию: раз в день в 05:00 UTC (8 утра по МСК)
+  # Запускать по расписанию
   schedule:
     - cron: '0 5 * * *'
-  # Позволяет запускать вручную с вкладки Actions
+  # Настройки для ручного запуска
   workflow_dispatch:
+    inputs:
+      test_mode:
+        description: 'Запустить в тестовом режиме? (true/false)'
+        required: true
+        default: 'false'
+        type: boolean
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    
+    # Передаем секреты в переменные окружения для ВСЕХ шагов
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
     steps:
-      # 1. Скачиваем код нашего Go-скрипта
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2. Устанавливаем Go
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+          cache: false
 
-      # 3. Запускаем наш скрипт, передавая ему секреты
+      # В этом шаге мы передаем только тестовый флаг,
+      # а секреты уже доступны благодаря 'env' на уровне 'jobs'
       - name: Run checker
         run: go run main.go
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FORCE_TEST_NOTIFICATION: ${{ inputs.test_mode }}
