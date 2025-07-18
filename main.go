@@ -66,7 +66,7 @@ func getConfig() (Config, error) {
 		},
 		TelegramBotToken: token,
 		TelegramChatID:   chatID,
-		IsTestRun:        strings.ToLower(os.Getenv("FORCE_TEST_NOTIFICATION")) == "true",,
+		IsTestRun:        strings.ToLower(os.Getenv("FORCE_TEST_NOTIFICATION")) == "true",
 	}, nil
 }
 
