@@ -15,8 +15,12 @@ import (
 	"sync"
  )
 
+// Repository описывает отслеживаемый репозиторий
 type Repository struct {
-	Name, URL, Path string
+	Name   string // Уникальное имя для логов и файлов
+	GitURL string // URL для git clone
+	WebURL string // URL для формирования ссылок на файлы
+	Path   string // Локальная папка
 }
 
 type Config struct {
@@ -61,12 +65,22 @@ func getConfig() (Config, error) {
 
 	return Config{
 		Repositories: []Repository{
-			{"nuclei-templates", "https://github.com/projectdiscovery/nuclei-templates.git", "nuclei-templates"},
-			{"nucleihub-templates", "https://github.com/rix4uni/nucleihub-templates.git", "nucleihub-templates"},
+			{
+				Name:   "nuclei-templates",
+				GitURL: "https://github.com/projectdiscovery/nuclei-templates.git",
+				WebURL: "https://github.com/projectdiscovery/nuclei-templates/blob/master",
+				Path:   "nuclei-templates",
+			},
+			{
+				Name:   "nucleihub-templates",
+				GitURL: "https://github.com/rix4uni/nucleihub-templates.git",
+				WebURL: "https://github.com/rix4uni/nucleihub-templates/blob/main", // У этого репо ветка 'main'
+				Path:   "nucleihub-templates",
+			},
 		},
 		TelegramBotToken: token,
 		TelegramChatID:   chatID,
-		IsTestRun:        strings.ToLower(os.Getenv("FORCE_TEST_NOTIFICATION")) == "true",
+		IsTestRun:        strings.ToLower(os.Getenv("FORCE_TEST_NOTIFICATION" )) == "true",
 	}, nil
 }
 
@@ -92,10 +106,9 @@ func checkRepository(repo Repository, cfg Config) error {
 		}
 	}
 
-	// --- Основная логика отправки ---
 	if cfg.IsTestRun {
-		log.Printf("[%s] Отправка тестового уведомления...", repo.Name)
-		testTemplates := []string{fmt.Sprintf("test/template-1-from-%s.yaml", repo.Name), "test/template-2.yaml"}
+		log.Printf("[%s] Отправка тестового уведомления со ссылками...", repo.Name)
+		testTemplates := []string{fmt.Sprintf("%s/test/template-1.yaml", repo.Path), fmt.Sprintf("%s/test/template-2.yaml", repo.Path)}
 		return notifyAboutNewTemplates(repo, testTemplates, cfg.TelegramBotToken, cfg.TelegramChatID)
 	}
 
@@ -115,11 +128,10 @@ func checkRepository(repo Repository, cfg Config) error {
 	return nil
 }
 
-// ... (остальные функции без изменений)
 func prepareRepo(repo Repository) error {
 	if _, err := os.Stat(repo.Path); os.IsNotExist(err) {
 		log.Printf("[%s] Клонирую репозиторий...", repo.Name)
-		return exec.Command("git", "clone", "--depth", "1", repo.URL, repo.Path).Run()
+		return exec.Command("git", "clone", "--depth", "1", repo.GitURL, repo.Path).Run()
 	}
 	log.Printf("[%s] Обновляю репозиторий...", repo.Name)
 	return exec.Command("git", "-C", repo.Path, "pull").Run()
@@ -166,12 +178,17 @@ func writeTemplatesToFile(file string, templates []string) error {
 	return writer.Flush()
 }
 
+// notifyAboutNewTemplates теперь формирует кликабельные ссылки
 func notifyAboutNewTemplates(repo Repository, templates []string, token, chatID string) error {
 	var msg strings.Builder
 	msg.WriteString(fmt.Sprintf("🔔 *Обнаружены новые шаблоны в `%s` (%d шт.):*\n\n", repo.Name, len(templates)))
 	for _, tpl := range templates {
-		cleanPath := strings.TrimPrefix(tpl, repo.Path+string(filepath.Separator))
-		msg.WriteString(fmt.Sprintf("`%s`\n", cleanPath))
+		// Убираем префикс папки, чтобы получить относительный путь
+		relativePath := strings.TrimPrefix(tpl, repo.Path+string(filepath.Separator))
+		// Формируем полную ссылку на файл
+		fileURL := fmt.Sprintf("%s/%s", repo.WebURL, relativePath)
+		// Добавляем в сообщение Markdown-ссылку
+		msg.WriteString(fmt.Sprintf("• [%s](%s)\n", relativePath, fileURL))
 	}
 
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token )
