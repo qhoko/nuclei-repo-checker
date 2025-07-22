@@ -103,6 +103,7 @@ func checkRepository(repo Repository, cfg Config ) error {
 
 	if isFirstRun {
 		log.Printf("[%s] Первый запуск. Найдено %d шаблонов. Сохраняю состояние.", repo.Name, len(currentTemplates))
+		// ИЗМЕНЕНИЕ ЗДЕСЬ: Добавлен обратный слэш перед точками
 		message := fmt.Sprintf("✅ *Начинаю отслеживание репозитория `%s`*\\.\n\nОбнаружено и сохранено %d шаблонов\\. Уведомления будут приходить при появлении новых\\.", repo.Name, len(currentTemplates))
 		if err := sendTelegramMessage(message, cfg.TelegramBotToken, cfg.TelegramChatID); err != nil {
 			log.Printf("WARN: Не удалось отправить стартовое уведомление для [%s]: %v", repo.Name, err)
@@ -111,10 +112,12 @@ func checkRepository(repo Repository, cfg Config ) error {
 		log.Printf("[%s] Найдено %d новых шаблонов. Отправляю уведомление...", repo.Name, len(newTemplates))
 		
 		var msg strings.Builder
+		// ИЗМЕНЕНИЕ ЗДЕСЬ: Добавлен обратный слэш перед точкой в "шт."
 		msg.WriteString(fmt.Sprintf("🔔 *Обнаружены новые шаблоны в `%s` (%d шт\\.)*\n\n", repo.Name, len(newTemplates)))
 		for _, tpl := range newTemplates {
 			relativePath := strings.TrimPrefix(tpl, repo.Path+string(filepath.Separator))
 			fileURL := fmt.Sprintf("%s/%s", repo.WebURL, relativePath)
+			// В ссылках ничего экранировать не нужно
 			msg.WriteString(fmt.Sprintf("• [%s](%s)\n", relativePath, fileURL))
 		}
 
@@ -182,22 +185,13 @@ func writeTemplatesToFile(file string, templates []string) error {
 	return writer.Flush()
 }
 
-// ИЗМЕНЕНИЕ ЗДЕСЬ: Используем parse_mode = "MarkdownV2" для надежности
+// Используем parse_mode = "MarkdownV2", он более строгий
 func sendTelegramMessage(message string, token, chatID string) error {
-	// Экранируем символы, которые могут конфликтовать с MarkdownV2
-	replacer := strings.NewReplacer(
-		"_", "\\_", "*", "\\*", "[", "\\[", "]", "\\]", "(",
-		"\\(", ")", "\\)", "~", "\\~", "`", "\\`", ">", "\\>",
-		"#", "\\#", "+", "\\+", "-", "\\-", "=", "\\=", "|",
-		"\\|", "{", "\\{", "}", "\\}", ".", "\\.", "!", "\\!",
-	)
-	safeMessage := replacer.Replace(message)
-
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token )
 	payload, _ := json.Marshal(map[string]string{
 		"chat_id":    chatID,
-		"text":       safeMessage,
-		"parse_mode": "MarkdownV2", // Используем более строгий, но надежный парсер
+		"text":       message,
+		"parse_mode": "MarkdownV2",
 	})
 
 	resp, err := http.Post(apiURL, "application/json", bytes.NewBuffer(payload ))
