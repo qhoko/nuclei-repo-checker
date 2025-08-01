@@ -1,17 +1,14 @@
 name: Check for new Nuclei templates
 
 on:
-  # Запускать по расписанию: раз в день в 05:00 UTC (8 утра по МСК)
   schedule:
-    - cron: '0 5 * * *'
-  # Позволяет запускать вручную с вкладки Actions
+    - cron: '0 5 * * *' # Раз в день в 05:00 UTC
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     
-    # Передаем секреты в переменные окружения для ВСЕХ шагов
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -24,7 +21,25 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-          cache: false
+
+      # ШАГ 1: Восстанавливаем файлы состояния из кэша
+      - name: Restore state files from cache
+        uses: actions/cache@v4
+        id: cache-state-files # Даем шагу ID, чтобы ссылаться на него
+        with:
+          # Путь к файлам, которые мы хотим кэшировать
+          path: known_templates_*.txt
+          # Ключ кэша. Он должен быть уникальным.
+          # Мы используем 'state-files-v1' - если мы захотим сбросить кэш, просто изменим v1 на v2
+          key: ${{ runner.os }}-state-files-v1
 
       - name: Run checker
         run: go run main.go
+
+      # ШАГ 2: Сохраняем обновленные файлы состояния в кэш
+      # Этот шаг сработает только если файлы 'known_templates_*.txt' были созданы или изменены
+      - name: Save state files to cache
+        uses: actions/cache/save@v4
+        with:
+          path: known_templates_*.txt
+          key: ${{ steps.cache-state-files.outputs.cache-key || format('{0}-state-files-v1', runner.os) }}
