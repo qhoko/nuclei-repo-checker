@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"os/exec"
@@ -15,7 +17,6 @@ import (
 	"sync"
  )
 
-// Repository описывает отслеживаемый репозиторий
 type Repository struct {
 	Name   string
 	GitURL string
@@ -28,9 +29,6 @@ type Config struct {
 	TelegramBotToken string
 	TelegramChatID   string
 }
-
-// Лимит длины сообщения в Telegram
-const telegramMessageLimit = 4096
 
 func main() {
 	cfg, err := getConfig()
@@ -110,33 +108,25 @@ func checkRepository(repo Repository, cfg Config ) error {
 			log.Printf("WARN: Не удалось отправить стартовое уведомление для [%s]: %v", repo.Name, err)
 		}
 	} else if len(newTemplates) > 0 {
-		log.Printf("[%s] Найдено %d новых шаблонов. Отправляю уведомление...", repo.Name, len(newTemplates))
+		log.Printf("[%s] Найдено %d новых шаблонов. Отправляю уведомление файлом...", repo.Name, len(newTemplates))
 		
-		header := escapeMarkdownV2(fmt.Sprintf("🔔 *Обнаружены новые шаблоны в `%s` (%d шт.)*\n\n", repo.Name, len(newTemplates)))
-		var messages []string
-		currentMessage := header
+		// Формируем заголовок сообщения
+		caption := fmt.Sprintf("🔔 *Обнаружены новые шаблоны в `%s` (%d шт\\.)*", repo.Name, len(newTemplates))
 
+		// Создаем содержимое для файла
+		var fileContent strings.Builder
 		for _, tpl := range newTemplates {
 			relativePath := strings.TrimPrefix(tpl, repo.Path+string(filepath.Separator))
-			// URL не нужно экранировать, а имя файла в тексте ссылки - нужно
 			fileURL := fmt.Sprintf("%s/%s", repo.WebURL, relativePath)
-			line := fmt.Sprintf("• [%s](%s)\n", escapeMarkdownV2(relativePath), fileURL)
-
-			if len(currentMessage)+len(line) > telegramMessageLimit {
-				messages = append(messages, currentMessage)
-				currentMessage = header // Начинаем новое сообщение с того же заголовка
-			}
-			currentMessage += line
+			fileContent.WriteString(fmt.Sprintf("%s\n", fileURL))
 		}
-		messages = append(messages, currentMessage) // Добавляем последнее (или единственное) сообщение
-
-		for i, msg := range messages {
-			log.Printf("Отправка сообщения %d/%d для %s", i+1, len(messages), repo.Name)
-			if err := sendTelegramMessage(msg, cfg.TelegramBotToken, cfg.TelegramChatID); err != nil {
-				// Логируем ошибку, но продолжаем, чтобы сохранить состояние
-				log.Printf("WARN: Не удалось отправить часть %d уведомления для [%s]: %v", i+1, repo.Name, err)
-			}
+		
+		// Отправляем как документ
+		fileName := fmt.Sprintf("new_templates_%s.txt", repo.Name)
+		if err := sendTelegramFile(caption, fileName, fileContent.String(), cfg.TelegramBotToken, cfg.TelegramChatID); err != nil {
+			log.Printf("WARN: Не удалось отправить файл с уведомлением для [%s]: %v", repo.Name, err)
 		}
+
 	} else {
 		log.Printf("[%s] Новых шаблонов не найдено.", repo.Name)
 	}
@@ -148,17 +138,14 @@ func checkRepository(repo Repository, cfg Config ) error {
 	return nil
 }
 
+// ... (функции prepareRepo, scanForTemplates, readTemplatesFromFile, writeTemplatesToFile остаются без изменений) ...
+
 func prepareRepo(repo Repository) error {
 	if _, err := os.Stat(repo.Path); os.IsNotExist(err) {
 		log.Printf("[%s] Клонирую репозиторий...", repo.Name)
-		// Используем --depth 1 для ускорения
 		return exec.Command("git", "clone", "--depth", "1", repo.GitURL, repo.Path).Run()
 	}
 	log.Printf("[%s] Обновляю репозиторий...", repo.Name)
-	// Сначала сбрасываем локальные изменения, если они есть, потом обновляем
-	if err := exec.Command("git", "-C", repo.Path, "reset", "--hard").Run(); err != nil {
-		return err
-	}
 	return exec.Command("git", "-C", repo.Path, "pull").Run()
 }
 
@@ -203,35 +190,70 @@ func writeTemplatesToFile(file string, templates []string) error {
 	return writer.Flush()
 }
 
-// Функция для экранирования спецсимволов для MarkdownV2
-func escapeMarkdownV2(text string) string {
-	replacer := strings.NewReplacer(
-		"_", "\\_", "*", "\\*", "[", "\\[", "]", "\\]", "(", "\\(", ")", "\\)",
-		"~", "\\~", "`", "\\`", ">", "\\>", "#", "\\#", "+", "\\+", "-", "\\-",
-		"=", "\\=", "|", "\\|", "{", "\\{", "}", "\\}", ".", "\\.", "!", "\\!",
-	)
-	return replacer.Replace(text)
-}
-
+// Отправляет простое текстовое сообщение (для стартового уведомления)
 func sendTelegramMessage(message, token, chatID string) error {
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token )
 	payload, _ := json.Marshal(map[string]string{
 		"chat_id":    chatID,
 		"text":       message,
 		"parse_mode": "MarkdownV2",
-		"disable_web_page_preview": "true", // Отключаем превью ссылок, чтобы сообщение было компактнее
 	})
-
 	resp, err := http.Post(apiURL, "application/json", bytes.NewBuffer(payload ))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var body map[string]interface{}
+		json.NewDecoder(resp.Body ).Decode(&body)
+		return fmt.Errorf("статус-код %d: %v", resp.StatusCode, body)
+	}
+	return nil
+}
+
+// Новая функция для отправки файла
+func sendTelegramFile(caption, fileName, fileContent, token, chatID string) error {
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", token )
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	// Обязательные поля
+	writer.WriteField("chat_id", chatID)
+	writer.WriteField("caption", caption)
+	writer.WriteField("parse_mode", "MarkdownV2")
+
+	// Создаем поле для файла
+	part, err := writer.CreateFormFile("document", fileName)
+	if err != nil {
+		return err
+	}
+	// Копируем содержимое нашего строкового файла в тело запроса
+	_, err = io.Copy(part, strings.NewReader(fileContent))
+	if err != nil {
+		return err
+	}
+
+	writer.Close() // Важно закрыть writer, чтобы записались финальные границы
+
+	req, err := http.NewRequest("POST", apiURL, body )
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	client := &http.Client{}
+	resp, err := client.Do(req )
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		var body map[string]interface{}
-		json.NewDecoder(resp.Body ).Decode(&body)
-		return fmt.Errorf("неожиданный статус-код от Telegram API: %d, ответ: %v", resp.StatusCode, body)
+		var respBody map[string]interface{}
+		json.NewDecoder(resp.Body ).Decode(&respBody)
+		return fmt.Errorf("статус-код %d: %v", resp.StatusCode, respBody)
 	}
+
 	return nil
 }
