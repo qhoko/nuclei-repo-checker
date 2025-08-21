@@ -2,45 +2,62 @@ name: Check for new Nuclei templates
 
 on:
   schedule:
-    - cron: '0 5 * * *' # Раз в день в 05:00 UTC
-  workflow_dispatch:
+    - cron: '0 5 * * *' # Исправлен cron: каждый день в 05:00 UTC
+  workflow_dispatch: # Позволяет запускать вручную
 
 jobs:
-  build:
+  check-templates:
     runs-on: ubuntu-latest
     
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
+      
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
+        
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-          # Включаем встроенное кэширование. Это самый надежный способ.
-          # Он сам правильно обработает создание go.sum.
-          cache: true
-
-      # --- Кэширование файлов состояния (known_templates) ---
-      # Этот шаг должен идти ДО запуска скрипта.
-      # Он восстановит кэш, если он есть, и сохранит его в конце, если файлы изменятся.
-      - name: Cache state files
-        id: cache-state
-        uses: actions/cache@v4
+          cache: false # Отключаем автоматическое кэширование Go
+          
+      # Создаем go.sum если его нет
+      - name: Initialize Go modules
+        run: |
+          if [ ! -f go.sum ]; then
+            go mod tidy
+          fi
+          
+      # Восстанавливаем файлы состояния из кэша
+      - name: Restore state files
+        uses: actions/cache/restore@v4
         with:
-          path: known_templates_*.txt
-          # Ключ основан на хэше файлов. 
-          # При первом запуске хэш будет от несуществующих файлов (пустой),
-          # а в конце работы будет вычислен новый хэш от созданных файлов и кэш будет сохранен.
-          key: ${{ runner.os }}-state-${{ hashFiles('known_templates_*.txt') }}
+          path: |
+            known_templates_*.txt
+          key: ${{ runner.os }}-templates-state-${{ github.run_id }}
           restore-keys: |
-            ${{ runner.os }}-state-
-
-      # --- Запуск скрипта ---
-      # Скрипт запускается ПОСЛЕ того, как все кэши были восстановлены.
-      - name: Run checker
+            ${{ runner.os }}-templates-state-
+            
+      # Запускаем проверку
+      - name: Run nuclei templates checker
         run: go run main.go
+        
+      # Сохраняем обновленные файлы состояния
+      - name: Save state files
+        uses: actions/cache/save@v4
+        if: always() # Сохраняем даже если предыдущий шаг упал
+        with:
+          path: |
+            known_templates_*.txt
+          key: ${{ runner.os }}-templates-state-${{ github.run_id }}
+          
+      # Дебаг информация (можно убрать после отладки)
+      - name: Debug info
+        if: always()
+        run: |
+          echo "=== Files in directory ==="
+          ls -la
+          echo "=== State files ==="
+          ls -la known_templates_*.txt || echo "No state files found"
