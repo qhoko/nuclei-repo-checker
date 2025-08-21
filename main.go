@@ -29,6 +29,9 @@ type Config struct {
 	TelegramChatID   string
 }
 
+// Лимит длины сообщения в Telegram
+const telegramMessageLimit = 4096
+
 func main() {
 	cfg, err := getConfig()
 	if err != nil {
@@ -85,10 +88,9 @@ func checkRepository(repo Repository, cfg Config ) error {
 	}
 
 	stateFile := fmt.Sprintf("known_templates_%s.txt", repo.Name)
-	_, err := os.Stat(stateFile)
+	knownTemplates, err := readTemplatesFromFile(stateFile)
 	isFirstRun := os.IsNotExist(err)
 
-	knownTemplates, _ := readTemplatesFromFile(stateFile)
 	currentTemplates, err := scanForTemplates(repo.Path)
 	if err != nil {
 		return fmt.Errorf("не удалось просканировать шаблоны: %w", err)
@@ -103,7 +105,6 @@ func checkRepository(repo Repository, cfg Config ) error {
 
 	if isFirstRun {
 		log.Printf("[%s] Первый запуск. Найдено %d шаблонов. Сохраняю состояние.", repo.Name, len(currentTemplates))
-		// ИЗМЕНЕНИЕ ЗДЕСЬ: Добавлен обратный слэш перед точками
 		message := fmt.Sprintf("✅ *Начинаю отслеживание репозитория `%s`*\\.\n\nОбнаружено и сохранено %d шаблонов\\. Уведомления будут приходить при появлении новых\\.", repo.Name, len(currentTemplates))
 		if err := sendTelegramMessage(message, cfg.TelegramBotToken, cfg.TelegramChatID); err != nil {
 			log.Printf("WARN: Не удалось отправить стартовое уведомление для [%s]: %v", repo.Name, err)
@@ -111,18 +112,30 @@ func checkRepository(repo Repository, cfg Config ) error {
 	} else if len(newTemplates) > 0 {
 		log.Printf("[%s] Найдено %d новых шаблонов. Отправляю уведомление...", repo.Name, len(newTemplates))
 		
-		var msg strings.Builder
-		// ИЗМЕНЕНИЕ ЗДЕСЬ: Добавлен обратный слэш перед точкой в "шт."
-		msg.WriteString(fmt.Sprintf("🔔 *Обнаружены новые шаблоны в `%s` (%d шт\\.)*\n\n", repo.Name, len(newTemplates)))
+		header := escapeMarkdownV2(fmt.Sprintf("🔔 *Обнаружены новые шаблоны в `%s` (%d шт.)*\n\n", repo.Name, len(newTemplates)))
+		var messages []string
+		currentMessage := header
+
 		for _, tpl := range newTemplates {
 			relativePath := strings.TrimPrefix(tpl, repo.Path+string(filepath.Separator))
+			// URL не нужно экранировать, а имя файла в тексте ссылки - нужно
 			fileURL := fmt.Sprintf("%s/%s", repo.WebURL, relativePath)
-			// В ссылках ничего экранировать не нужно
-			msg.WriteString(fmt.Sprintf("• [%s](%s)\n", relativePath, fileURL))
-		}
+			line := fmt.Sprintf("• [%s](%s)\n", escapeMarkdownV2(relativePath), fileURL)
 
-		if err := sendTelegramMessage(msg.String(), cfg.TelegramBotToken, cfg.TelegramChatID); err != nil {
-			log.Printf("WARN: Не удалось отправить уведомление для [%s]: %v", repo.Name, err)
+			if len(currentMessage)+len(line) > telegramMessageLimit {
+				messages = append(messages, currentMessage)
+				currentMessage = header // Начинаем новое сообщение с того же заголовка
+			}
+			currentMessage += line
+		}
+		messages = append(messages, currentMessage) // Добавляем последнее (или единственное) сообщение
+
+		for i, msg := range messages {
+			log.Printf("Отправка сообщения %d/%d для %s", i+1, len(messages), repo.Name)
+			if err := sendTelegramMessage(msg, cfg.TelegramBotToken, cfg.TelegramChatID); err != nil {
+				// Логируем ошибку, но продолжаем, чтобы сохранить состояние
+				log.Printf("WARN: Не удалось отправить часть %d уведомления для [%s]: %v", i+1, repo.Name, err)
+			}
 		}
 	} else {
 		log.Printf("[%s] Новых шаблонов не найдено.", repo.Name)
@@ -138,16 +151,21 @@ func checkRepository(repo Repository, cfg Config ) error {
 func prepareRepo(repo Repository) error {
 	if _, err := os.Stat(repo.Path); os.IsNotExist(err) {
 		log.Printf("[%s] Клонирую репозиторий...", repo.Name)
+		// Используем --depth 1 для ускорения
 		return exec.Command("git", "clone", "--depth", "1", repo.GitURL, repo.Path).Run()
 	}
 	log.Printf("[%s] Обновляю репозиторий...", repo.Name)
+	// Сначала сбрасываем локальные изменения, если они есть, потом обновляем
+	if err := exec.Command("git", "-C", repo.Path, "reset", "--hard").Run(); err != nil {
+		return err
+	}
 	return exec.Command("git", "-C", repo.Path, "pull").Run()
 }
 
 func scanForTemplates(dir string) ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && strings.HasSuffix(path, ".yaml") {
+		if err == nil && !d.IsDir() && (strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml")) {
 			files = append(files, path)
 		}
 		return err
@@ -185,13 +203,23 @@ func writeTemplatesToFile(file string, templates []string) error {
 	return writer.Flush()
 }
 
-// Используем parse_mode = "MarkdownV2", он более строгий
-func sendTelegramMessage(message string, token, chatID string) error {
+// Функция для экранирования спецсимволов для MarkdownV2
+func escapeMarkdownV2(text string) string {
+	replacer := strings.NewReplacer(
+		"_", "\\_", "*", "\\*", "[", "\\[", "]", "\\]", "(", "\\(", ")", "\\)",
+		"~", "\\~", "`", "\\`", ">", "\\>", "#", "\\#", "+", "\\+", "-", "\\-",
+		"=", "\\=", "|", "\\|", "{", "\\{", "}", "\\}", ".", "\\.", "!", "\\!",
+	)
+	return replacer.Replace(text)
+}
+
+func sendTelegramMessage(message, token, chatID string) error {
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token )
 	payload, _ := json.Marshal(map[string]string{
 		"chat_id":    chatID,
 		"text":       message,
 		"parse_mode": "MarkdownV2",
+		"disable_web_page_preview": "true", // Отключаем превью ссылок, чтобы сообщение было компактнее
 	})
 
 	resp, err := http.Post(apiURL, "application/json", bytes.NewBuffer(payload ))
