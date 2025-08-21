@@ -21,56 +21,42 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-          # Отключаем встроенное в setup-go кэширование, чтобы управлять им вручную
-          cache: false 
+          cache: false # Управляем кэшем вручную
 
-      # ШАГ 1: Восстанавливаем кэш Go-модулей, если он есть
+      # --- Кэширование зависимостей Go ---
       - name: Restore Go modules cache
         id: cache-go-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache@v4
         with:
           path: ~/go/pkg/mod
-          # Ключ восстановления ищет любой подходящий кэш
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-
 
-      # ШАГ 2: Устанавливаем зависимости. go mod tidy создаст/обновит go.sum
       - name: Install dependencies
         run: go mod tidy
 
-      # ШАГ 3: Сохраняем кэш Go-модулей
-      # Этот шаг сработает, только если зависимости изменились (т.е. хэш go.sum поменялся)
-      - name: Save Go modules cache
-        uses: actions/cache/save@v4
-        with:
-          path: ~/go/pkg/mod
-          # Ключ для сохранения теперь будет точным, т.к. go.sum уже существует
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        # Условие: выполняем, только если кэш не был полностью восстановлен на шаге 1
-        if: steps.cache-go-restore.outputs.cache-hit != 'true'
-
-      # ШАГ 4: Восстанавливаем файлы состояния (known_templates)
+      # --- Кэширование файлов состояния (known_templates) ---
       - name: Restore state files cache
         id: cache-state-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache@v4
         with:
           path: known_templates_*.txt
-          # Ищем самый свежий кэш по префиксу
+          # Используем общий префикс для поиска самого свежего кэша
+          key: ${{ runner.os }}-state-${{ hashFiles('known_templates_*.txt') }}
           restore-keys: |
             ${{ runner.os }}-state-
-          # Ключ для сохранения будет точным, на основе хэша файлов
-          key: ${{ runner.os }}-state-${{ hashFiles('known_templates_*.txt') }}
 
       - name: Run checker
         run: go run main.go
 
-      # ШАГ 5: Сохраняем обновленные файлы состояния в кэш
-      # Сработает, только если файлы known_templates_*.txt изменились
+      # --- Сохранение кэша файлов состояния ---
+      # Этот шаг должен выполняться ПОСЛЕ запуска скрипта, чтобы захватить изменения
       - name: Save state files cache
-        uses: actions/cache/save@v4
+        id: cache-state-save
+        uses: actions/cache@v4
         with:
           path: known_templates_*.txt
-          key: ${{ steps.cache-state-restore.outputs.cache-primary-key }}
-        # Условие: выполняем, только если кэш не был полностью восстановлен на шаге 4
-        if: steps.cache-state-restore.outputs.cache-hit != 'true'
-
+          # Ключ генерируется на основе хэша файлов, которые существуют ПОСЛЕ работы скрипта.
+          # Этот ключ будет новым, если скрипт изменил или создал файлы.
+          key: ${{ runner.os }}-state-${{ hashFiles('known_templates_*.txt') }}
